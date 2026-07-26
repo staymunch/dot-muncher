@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#bfe9ff">
+<meta name="description" content="A gentle 3D snake game for little ones — drag to steer, eat the glowing dots, no way to lose.">
+<title>Dot Muncher 🐍</title>
+</head>
+<body>
+<style>
+  :root{ --card:#ffffffee; --pill-ink:#1f6b3f; --ink:#204a30; }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{height:100%;margin:0;}
+  body{
+    font-family:"ui-rounded","SF Pro Rounded",system-ui,-apple-system,"Segoe UI",sans-serif;
+    color:var(--ink); background:#bfe9ff; overflow:hidden;
+    user-select:none;-webkit-user-select:none; touch-action:none;
+  }
+  #gl{position:fixed;inset:0;width:100%;height:100%;display:block;z-index:0;touch-action:none;}
+  #app{position:relative;z-index:1;height:100%;display:flex;flex-direction:column;
+       align-items:center;justify-content:space-between;pointer-events:none;
+       padding:calc(env(safe-area-inset-top,0px) + 12px) 12px calc(env(safe-area-inset-bottom,0px) + 18px);}
+  #topbar{width:100%;max-width:560px;display:flex;align-items:center;justify-content:center;gap:14px;position:relative;}
+  #score{display:flex;align-items:center;gap:12px;background:var(--card);border-radius:100px;
+    padding:10px 22px 10px 14px;box-shadow:0 8px 24px #1c4a3033, inset 0 0 0 3px #ffffff;}
+  #score .berry{width:34px;height:34px;border-radius:50%;
+    background:radial-gradient(circle at 32% 28%,#ffd0d8,#ff5d73 55%,#e23a55);
+    box-shadow:inset 0 -4px 8px #b81f3a66, 0 4px 8px #ff5d7355;}
+  #score .num{font-size:38px;font-weight:800;line-height:1;color:var(--pill-ink);
+    font-variant-numeric:tabular-nums;min-width:1.2ch;text-align:center;}
+  #score .num.pop{animation:pop .35s ease;}
+  @keyframes pop{0%{transform:scale(1)}40%{transform:scale(1.5)}100%{transform:scale(1)}}
+  #score .cap{font-size:14px;font-weight:700;color:#5a8a6c;letter-spacing:.06em;text-transform:uppercase;}
+  #sound{position:absolute;right:0;top:50%;transform:translateY(-50%);pointer-events:auto;
+    width:52px;height:52px;border:none;border-radius:50%;background:var(--card);
+    box-shadow:0 6px 18px #1c4a3033, inset 0 0 0 3px #ffffff; font-size:26px;cursor:pointer;display:grid;place-items:center;}
+  #sound:active{transform:translateY(-50%) scale(.92);}
+  #hint{font-size:17px;font-weight:700;color:#2c6a49;background:var(--card);
+    padding:9px 20px;border-radius:100px;box-shadow:0 6px 16px #1c4a3022, inset 0 0 0 3px #ffffff; transition:opacity .6s;}
+</style>
+
+<canvas id="gl"></canvas>
+<div id="app">
+  <div id="topbar">
+    <div id="score"><div class="berry"></div><div class="num" id="num">0</div><div class="cap">dots</div></div>
+    <button id="sound" aria-label="Sound on or off">🔊</button>
+  </div>
+  <div id="hint">👆 drag to steer 🐍</div>
+</div>
+
+<script>
+(function(){
+  // ---------------- config ----------------
+  var SPEED=6.0, SPEED_E=5.0, TURN=6.0;
+  var R_HEAD=0.95, R_BODY=0.68, R_TAIL=0.16, STEP=0.30, CAP=82, CAPe=30;
+  var L0=6.0, GROW=0.85, ELEN_MIN=8, ELEN_MAX=15, ENEMIES=4;
+  var PELLETS=50, P_R=0.55, EAT=1.15, RING_IN=16, RING_OUT=42, CULL=50;
+  var FOOD_COLORS=[[1,.36,.45],[1,.66,.2],[1,.85,.28],[.42,.78,1],[.72,.5,1],[1,.5,.78],[.5,.88,.5]];
+  var ENEMY_COLORS=[[.36,.82,.44],[1,.6,.26],[.72,.46,1],[1,.5,.76]];
+  var PLAYER_COLOR=[.20,.46,1.0];
+  var SKY_TOP=[0.60,0.81,1.0], SKY_BOT=[0.86,0.97,0.93], FOG=[0.74,0.87,1.0];
+
+  var num=document.getElementById('num'), hintEl=document.getElementById('hint');
+  var canvas=document.getElementById('gl');
+  var gl=canvas.getContext('webgl',{antialias:true,alpha:false});
+  if(!gl){ document.body.innerHTML='<p style="padding:20px;font:20px sans-serif">Sorry, this device can’t show the 3D game.</p>'; return; }
+
+  function sh(t,s){ var o=gl.createShader(t); gl.shaderSource(o,s); gl.compileShader(o);
+    if(!gl.getShaderParameter(o,gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(o),s); return o; }
+  function prog(v,f){ var p=gl.createProgram(); gl.attachShader(p,sh(gl.VERTEX_SHADER,v)); gl.attachShader(p,sh(gl.FRAGMENT_SHADER,f));
+    gl.linkProgram(p); if(!gl.getProgramParameter(p,gl.LINK_STATUS)) console.error(gl.getProgramInfoLog(p)); return p; }
+
+  var litP=prog(
+   'attribute vec3 aPos; attribute vec3 aNor; uniform mat4 uProj,uView,uModel; varying vec3 vN,vW;'+
+   'void main(){ vec4 w=uModel*vec4(aPos,1.0); vW=w.xyz; vN=mat3(uModel)*aNor; gl_Position=uProj*uView*w; }',
+   'precision highp float; varying vec3 vN,vW; uniform vec3 uColor,uCam,uFog; uniform float uShine,uSpec;'+
+   'uniform int uGround; uniform float uFogN,uFogF;'+
+   'void main(){'+
+   ' vec3 N=normalize(vN); vec3 L=normalize(vec3(-0.42,1.0,0.5)); vec3 V=normalize(uCam-vW); vec3 H=normalize(L+V);'+
+   ' float diff=max(dot(N,L),0.0); float hemi=0.5+0.5*N.y; vec3 amb=mix(vec3(.32,.42,.34),vec3(.80,.88,1.0),hemi);'+
+   ' vec3 base=uColor;'+
+   ' if(uGround==1){ float c=mod(floor(vW.x*0.5+0.001)+floor(vW.z*0.5+0.001),2.0); base*=(c<1.0?1.0:0.90);'+
+   '   base*=0.96+0.04*sin(vW.x*1.3)*cos(vW.z*1.1); }'+
+   ' float spec=pow(max(dot(N,H),0.0),uShine)*uSpec; float rim=pow(1.0-max(dot(N,V),0.0),3.0)*0.20;'+
+   ' vec3 col=base*(amb*0.60+diff*0.72)+spec+rim; col=pow(col,vec3(0.92));'+
+   ' float fd=length(uCam-vW); col=mix(col,uFog,smoothstep(uFogN,uFogF,fd));'+
+   ' gl_FragColor=vec4(col,1.0); }');
+  var Lu={}; ['uProj','uView','uModel','uColor','uCam','uShine','uSpec','uGround','uFog','uFogN','uFogF'].forEach(function(k){Lu[k]=gl.getUniformLocation(litP,k);});
+  var LaPos=gl.getAttribLocation(litP,'aPos'), LaNor=gl.getAttribLocation(litP,'aNor');
+
+  var spP=prog(
+   'attribute vec2 aQ; uniform mat4 uProj,uView; uniform vec3 uCenter; uniform float uSize; uniform int uBill; varying vec2 vUV;'+
+   'void main(){ vUV=aQ; vec3 wp; if(uBill==1){ vec3 r=vec3(uView[0][0],uView[1][0],uView[2][0]); vec3 u=vec3(uView[0][1],uView[1][1],uView[2][1]); wp=uCenter+(r*aQ.x+u*aQ.y)*uSize; } else { wp=uCenter+vec3(aQ.x,0.0,aQ.y)*uSize; } gl_Position=uProj*uView*vec4(wp,1.0); }',
+   'precision highp float; varying vec2 vUV; uniform vec4 uColor; uniform float uSoft;'+
+   'void main(){ float d=length(vUV); float a=smoothstep(1.0,uSoft,d); gl_FragColor=vec4(uColor.rgb,uColor.a*a); }');
+  var Su={}; ['uProj','uView','uCenter','uSize','uBill','uColor','uSoft'].forEach(function(k){Su[k]=gl.getUniformLocation(spP,k);});
+  var SaQ=gl.getAttribLocation(spP,'aQ');
+
+  var bgP=prog(
+   'attribute vec2 aQ; varying vec2 vUV; void main(){ vUV=aQ; gl_Position=vec4(aQ,0.999,1.0); }',
+   'precision highp float; varying vec2 vUV; uniform vec3 uTop,uBot; void main(){ float t=vUV.y*0.5+0.5; gl_FragColor=vec4(mix(uBot,uTop,t),1.0); }');
+  var Bu={top:gl.getUniformLocation(bgP,'uTop'),bot:gl.getUniformLocation(bgP,'uBot')}, BaQ=gl.getAttribLocation(bgP,'aQ');
+
+  // ---------------- geometry ----------------
+  function fbuf(d){ var b=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,b); gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(d),gl.STATIC_DRAW); return b; }
+  function ebuf(d){ var b=gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,b); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,new Uint16Array(d),gl.STATIC_DRAW); return b; }
+  function sphere(la,lo){ var p=[],idx=[];
+    for(var i=0;i<=la;i++){ var th=i/la*Math.PI, st=Math.sin(th), ct=Math.cos(th);
+      for(var j=0;j<=lo;j++){ var ph=j/lo*6.283, sp=Math.sin(ph), cp=Math.cos(ph); p.push(cp*st,ct,sp*st); } }
+    for(var i=0;i<la;i++)for(var j=0;j<lo;j++){ var a=i*(lo+1)+j,b=a+lo+1; idx.push(a,b,a+1,b,b+1,a+1); }
+    return {pos:fbuf(p),idx:ebuf(idx),n:idx.length}; }
+  var SPH=sphere(16,24);
+  var PLANE=(function(){ var s=1; var p=[-s,0,-s,0,1,0, s,0,-s,0,1,0, s,0,s,0,1,0, -s,0,s,0,1,0];
+    return {buf:fbuf(p),idx:ebuf([0,1,2,0,2,3]),n:6}; })();
+  var QUAD=fbuf([-1,-1,1,-1,1,1,-1,-1,1,1,-1,1]);
+
+  // ---------------- math ----------------
+  function persp(f,a,n,fa){ var t=1/Math.tan(f/2); return [t/a,0,0,0,0,t,0,0,0,0,(fa+n)/(n-fa),-1,0,0,2*fa*n/(n-fa),0]; }
+  function look(e,c,u){ var zx=e[0]-c[0],zy=e[1]-c[1],zz=e[2]-c[2],zl=Math.hypot(zx,zy,zz); zx/=zl;zy/=zl;zz/=zl;
+    var xx=u[1]*zz-u[2]*zy,xy=u[2]*zx-u[0]*zz,xz=u[0]*zy-u[1]*zx,xl=Math.hypot(xx,xy,xz); xx/=xl;xy/=xl;xz/=xl;
+    var yx=zy*xz-zz*xy,yy=zz*xx-zx*xz,yz=zx*xy-zy*xx;
+    return [xx,yx,zx,0,xy,yy,zy,0,xz,yz,zz,0,-(xx*e[0]+xy*e[1]+xz*e[2]),-(yx*e[0]+yy*e[1]+yz*e[2]),-(zx*e[0]+zy*e[1]+zz*e[2]),1]; }
+  function mdl(x,y,z,s){ return [s,0,0,0,0,s,0,0,0,0,s,0,x,y,z,1]; }
+  function mdlS(x,y,z,sx,sy,sz){ return [sx,0,0,0,0,sy,0,0,0,0,sz,0,x,y,z,1]; }
+
+  var CAM_H=25, CAM_BACK=17, cam=[0,CAM_H,CAM_BACK], proj, view;
+  function resize(){ var dpr=Math.min(window.devicePixelRatio||1,2), w=window.innerWidth,h=window.innerHeight;
+    canvas.width=w*dpr; canvas.height=h*dpr; gl.viewport(0,0,canvas.width,canvas.height);
+    proj=persp(44*Math.PI/180, w/h, 0.1, 200); }
+  window.addEventListener('resize',resize); resize();
+
+  // ---------------- draw helpers ----------------
+  function drawLit(mesh,interleaved,m,col,shine,spec,ground){
+    gl.useProgram(litP);
+    gl.uniformMatrix4fv(Lu.uProj,false,proj); gl.uniformMatrix4fv(Lu.uView,false,view); gl.uniformMatrix4fv(Lu.uModel,false,m);
+    gl.uniform3fv(Lu.uColor,col); gl.uniform3fv(Lu.uCam,cam); gl.uniform1f(Lu.uShine,shine); gl.uniform1f(Lu.uSpec,spec);
+    gl.uniform1i(Lu.uGround,ground||0); gl.uniform3fv(Lu.uFog,FOG); gl.uniform1f(Lu.uFogN,ground?34:120); gl.uniform1f(Lu.uFogF,ground?95:200);
+    if(interleaved){ gl.bindBuffer(gl.ARRAY_BUFFER,mesh.buf);
+      gl.enableVertexAttribArray(LaPos); gl.vertexAttribPointer(LaPos,3,gl.FLOAT,false,24,0);
+      gl.enableVertexAttribArray(LaNor); gl.vertexAttribPointer(LaNor,3,gl.FLOAT,false,24,12);
+    } else { gl.bindBuffer(gl.ARRAY_BUFFER,mesh.pos);
+      gl.enableVertexAttribArray(LaPos); gl.vertexAttribPointer(LaPos,3,gl.FLOAT,false,0,0);
+      gl.enableVertexAttribArray(LaNor); gl.vertexAttribPointer(LaNor,3,gl.FLOAT,false,0,0); }
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,mesh.idx); gl.drawElements(gl.TRIANGLES,mesh.n,gl.UNSIGNED_SHORT,0);
+  }
+  function sprite(x,y,z,size,col,a,bill,soft){
+    gl.useProgram(spP); gl.uniformMatrix4fv(Su.uProj,false,proj); gl.uniformMatrix4fv(Su.uView,false,view);
+    gl.uniform3f(Su.uCenter,x,y,z); gl.uniform1f(Su.uSize,size); gl.uniform1i(Su.uBill,bill);
+    gl.uniform4f(Su.uColor,col[0],col[1],col[2],a); gl.uniform1f(Su.uSoft,soft||0);
+    gl.bindBuffer(gl.ARRAY_BUFFER,QUAD); gl.enableVertexAttribArray(SaQ); gl.vertexAttribPointer(SaQ,2,gl.FLOAT,false,0,0);
+    gl.drawArrays(gl.TRIANGLES,0,6);
+  }
+
+  // ---------------- game state ----------------
+  var snakes, player, pellets, sparks, tsec, eaten;
+
+  function makeSnake(x,z,dir,color,isPlayer){
+    var s={hx:x,hz:z,theta:dir,target:dir,color:color,isPlayer:isPlayer,retime:0,
+      curLen:L0, tgtLen:isPlayer?L0:(ELEN_MIN+Math.random()*(ELEN_MAX-ELEN_MIN)), path:[]};
+    fillPath(s); return s;
+  }
+  function fillPath(s){ s.path=[]; for(var i=0;i<600;i++) s.path.push({x:s.hx-Math.cos(s.theta)*i*0.1, z:s.hz-Math.sin(s.theta)*i*0.1}); }
+
+  function reset(){ eaten=0; tsec=0; sparks=[];
+    player=makeSnake(0,0,0,PLAYER_COLOR,true); snakes=[player];
+    for(var i=0;i<ENEMIES;i++){ var a=Math.random()*6.283, d=22+Math.random()*18;
+      snakes.push(makeSnake(Math.cos(a)*d, Math.sin(a)*d, Math.random()*6.283, ENEMY_COLORS[i%ENEMY_COLORS.length], false)); }
+    pellets=[]; for(var i=0;i<PELLETS;i++) pellets.push(newPellet(true));
+  }
+  function newPellet(anywhere){ var a=Math.random()*6.283, d=anywhere?(4+Math.random()*RING_OUT):(RING_IN+Math.random()*(RING_OUT-RING_IN));
+    return {x:player.hx+Math.cos(a)*d, z:player.hz+Math.sin(a)*d, c:FOOD_COLORS[(Math.random()*FOOD_COLORS.length)|0], ph:Math.random()*6.283}; }
+  function pointAt(path,D){ var acc=0; for(var i=0;i<path.length-1;i++){ var a=path[i],b=path[i+1],s=Math.hypot(a.x-b.x,a.z-b.z);
+      if(acc+s>=D){ var f=(D-acc)/(s||1); return {x:a.x+(b.x-a.x)*f,z:a.z+(b.z-a.z)*f}; } acc+=s; }
+    var l=path[path.length-1]; return {x:l.x,z:l.z}; }
+
+  // ---------------- simulation ----------------
+  function stepSnake(s,dt){
+    if(!s.isPlayer){
+      s.retime-=dt;
+      if(s.retime<=0){
+        var best=null,bd=1e9;
+        for(var i=0;i<pellets.length;i++){ var p=pellets[i], d=Math.hypot(p.x-s.hx,p.z-s.hz); if(d<bd){bd=d;best=p;} }
+        if(best && bd<36) s.target=Math.atan2(best.z-s.hz,best.x-s.hx)+(Math.random()-0.5)*0.5;
+        else s.target=Math.random()*6.283;
+        s.retime=0.6+Math.random()*1.4;
+      }
+      if(Math.hypot(s.hx-player.hx,s.hz-player.hz)>62){ var a=Math.random()*6.283, d=40+Math.random()*8;
+        s.hx=player.hx+Math.cos(a)*d; s.hz=player.hz+Math.sin(a)*d; s.theta=s.target=a+Math.PI; fillPath(s); }
+    }
+    var sp=s.isPlayer?SPEED:SPEED_E;
+    var diff=Math.atan2(Math.sin(s.target-s.theta),Math.cos(s.target-s.theta)), mx=TURN*dt; s.theta+=Math.max(-mx,Math.min(mx,diff));
+    s.hx+=Math.cos(s.theta)*sp*dt; s.hz+=Math.sin(s.theta)*sp*dt;
+    s.path.unshift({x:s.hx,z:s.hz}); if(s.path.length>2000) s.path.length=2000;
+    s.curLen+=(s.tgtLen-s.curLen)*Math.min(1,dt*4);
+    for(var i=0;i<pellets.length;i++){ var p=pellets[i]; if(Math.hypot(p.x-s.hx,p.z-s.hz)<EAT){
+      if(s.isPlayer){ eaten++; num.textContent=eaten; num.classList.remove('pop'); void num.offsetWidth; num.classList.add('pop'); chime(); burst(p.x,p.z,p.c,16); }
+      else { s.tgtLen=Math.min(s.tgtLen+0.5, ELEN_MAX+10); burst(p.x,p.z,p.c,7); }
+      pellets[i]=newPellet(false); } }
+  }
+
+  // ---------------- loop ----------------
+  var last=0;
+  function frame(t){ if(!last)last=t; var dt=Math.min((t-last)/1000,0.05); last=t; tsec+=dt;
+    for(var i=0;i<snakes.length;i++) stepSnake(snakes[i],dt);
+    for(var i=sparks.length-1;i>=0;i--){ var s=sparks[i]; s.life-=dt; if(s.life<=0){sparks.splice(i,1);continue;}
+      s.x+=s.vx*dt; s.y+=s.vy*dt; s.z+=s.vz*dt; s.vy-=7*dt; }
+    cam=[player.hx, CAM_H, player.hz+CAM_BACK]; view=look(cam,[player.hx,0,player.hz],[0,1,0]);
+    render(); requestAnimationFrame(frame);
+  }
+
+  function segR(t,k){ if(k===0) return R_HEAD; if(k===1) return (R_HEAD+R_BODY)*0.5;
+    return R_BODY - (R_BODY-R_TAIL)*Math.pow(Math.max((t-0.55)/0.45,0),1.6); }
+  function bodyColor(s,d,t){ var band=0.80+0.20*(0.5+0.5*Math.sin(d*1.15));
+    return [s.color[0]*band, (s.color[1]+0.12*t)*band, s.color[2]*band]; }
+  function drawEyes(s,x,y,z){ var f=[Math.cos(s.theta),0,Math.sin(s.theta)], r=[Math.sin(s.theta),0,-Math.cos(s.theta)];
+    for(var e=-1;e<=1;e+=2){ var ex=x+f[0]*R_HEAD*0.6+r[0]*R_HEAD*0.42*e, ey=y+R_HEAD*0.45, ez=z+f[2]*R_HEAD*0.6+r[2]*R_HEAD*0.42*e;
+      drawLit(SPH,false, mdl(ex,ey,ez,R_HEAD*0.30),[1,1,1],20,0.5,0);
+      drawLit(SPH,false, mdl(ex+f[0]*R_HEAD*0.16,ey+0.02,ez+f[2]*R_HEAD*0.16,R_HEAD*0.15),[0.09,0.12,0.22],30,0.6,0); } }
+  function burst(x,z,c,n){ for(var i=0;i<n;i++){ var a=Math.random()*6.283, sp=1.4+Math.random()*2.6;
+    sparks.push({x:x,y:P_R+0.3,z:z, vx:Math.cos(a)*sp, vy:2.2+Math.random()*2.6, vz:Math.sin(a)*sp,
+      life:0.55+Math.random()*0.3, max:0.85, c:Math.random()<0.5?[1,1,0.85]:c}); } }
+  function visible(s){ return s.isPlayer || Math.hypot(s.hx-player.hx,s.hz-player.hz)<54; }
+  function snakeK(s){ return Math.max(6,Math.min(Math.round(s.curLen/STEP), s.isPlayer?CAP:CAPe)); }
+
+  function render(){
+    gl.clearColor(SKY_TOP[0],SKY_TOP[1],SKY_TOP[2],1); gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+    gl.disable(gl.DEPTH_TEST); gl.depthMask(false);
+    gl.useProgram(bgP); gl.uniform3fv(Bu.top,SKY_TOP); gl.uniform3fv(Bu.bot,SKY_BOT);
+    gl.bindBuffer(gl.ARRAY_BUFFER,QUAD); gl.enableVertexAttribArray(BaQ); gl.vertexAttribPointer(BaQ,2,gl.FLOAT,false,0,0); gl.drawArrays(gl.TRIANGLES,0,6);
+
+    gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.depthMask(true);
+    drawLit(PLANE,true, mdlS(player.hx,0,player.hz,130,1,130), [0.40,0.76,0.44], 10, 0.08, 1);
+
+    // shadows
+    gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false);
+    for(var n=0;n<snakes.length;n++){ var s=snakes[n]; if(!visible(s))continue; var K=snakeK(s);
+      for(var k=0;k<K;k+=2){ var t=k/(K-1), p=(k===0)?{x:s.hx,z:s.hz}:pointAt(s.path,t*s.curLen);
+        sprite(p.x,0.02,p.z, segR(t,k)*1.5,[0.05,0.16,0.09],0.28,0,0.35); } }
+    for(var i=0;i<pellets.length;i++){ var p=pellets[i]; if(Math.hypot(p.x-player.hx,p.z-player.hz)>CULL)continue;
+      sprite(p.x,0.02,p.z, P_R*1.3,[0.05,0.16,0.09],0.26,0,0.4); }
+    gl.depthMask(true);
+
+    // snake bodies
+    for(var n=0;n<snakes.length;n++){ var s=snakes[n]; if(!visible(s))continue; var K=snakeK(s);
+      for(var k=K-1;k>=0;k--){ var t=k/(K-1), d=t*s.curLen, p=(k===0)?{x:s.hx,z:s.hz}:pointAt(s.path,d);
+        var r=segR(t,k); drawLit(SPH,false, mdl(p.x,r,p.z,r), bodyColor(s,d,t), 30, 0.6, 0);
+        if(k===0) drawEyes(s,p.x,r,p.z); } }
+
+    // pellets
+    for(var i=0;i<pellets.length;i++){ var p=pellets[i]; if(Math.hypot(p.x-player.hx,p.z-player.hz)>CULL)continue;
+      var by=P_R+0.15+0.12*Math.sin(tsec*2.4+p.ph); drawLit(SPH,false, mdl(p.x,by,p.z,P_R), p.c, 55, 0.9, 0); }
+
+    // additive glow + sparkles
+    gl.blendFunc(gl.SRC_ALPHA,gl.ONE); gl.depthMask(false);
+    for(var i=0;i<pellets.length;i++){ var p=pellets[i]; if(Math.hypot(p.x-player.hx,p.z-player.hz)>CULL)continue;
+      var by=P_R+0.15+0.12*Math.sin(tsec*2.4+p.ph), g=0.42+0.18*Math.sin(tsec*2.4+p.ph);
+      sprite(p.x,by,p.z, P_R*2.2, p.c, 0.22*g, 1, 0.0); }
+    for(var i=0;i<sparks.length;i++){ var s=sparks[i], a=Math.max(s.life/s.max,0);
+      sprite(s.x,s.y,s.z, 0.16+0.16*a, s.c, a, 1, 0.0); }
+    gl.depthMask(true); gl.disable(gl.BLEND);
+  }
+
+  // ---------------- input ----------------
+  var dragging=false,lpx=0,lpy=0,hid=false;
+  function steer(dx,dy){ if(Math.hypot(dx,dy)<5)return; player.target=Math.atan2(dy,dx); if(!hid){hid=true;hintEl.style.opacity='0';} }
+  canvas.addEventListener('pointerdown',function(e){ unlock(); dragging=true; lpx=e.clientX; lpy=e.clientY; try{canvas.setPointerCapture(e.pointerId);}catch(_){}});
+  canvas.addEventListener('pointermove',function(e){ if(!dragging)return; steer(e.clientX-lpx,e.clientY-lpy); lpx=e.clientX; lpy=e.clientY; });
+  canvas.addEventListener('pointerup',function(){dragging=false;}); canvas.addEventListener('pointercancel',function(){dragging=false;});
+  window.addEventListener('keydown',function(e){ var m={ArrowUp:-Math.PI/2,ArrowDown:Math.PI/2,ArrowLeft:Math.PI,ArrowRight:0};
+    if(m[e.key]!==undefined){e.preventDefault(); player.target=m[e.key]; if(!hid){hid=true;hintEl.style.opacity='0';}} });
+
+  // ---------------- sound ----------------
+  var actx=null,muted=false;
+  function unlock(){ if(!actx){try{actx=new (window.AudioContext||window.webkitAudioContext)();}catch(e){}} if(actx&&actx.state==='suspended')actx.resume(); }
+  function chime(){ if(muted||!actx)return; [523.25,659.25,783.99].forEach(function(f,i){ var o=actx.createOscillator(),g=actx.createGain();
+    o.type='sine'; o.frequency.value=f; var s=actx.currentTime+i*0.06; g.gain.setValueAtTime(0,s); g.gain.linearRampToValueAtTime(0.09,s+0.03);
+    g.gain.exponentialRampToValueAtTime(0.0001,s+0.32); o.connect(g); g.connect(actx.destination); o.start(s); o.stop(s+0.34); }); }
+  document.getElementById('sound').addEventListener('click',function(){ muted=!muted; unlock(); this.textContent=muted?'🔈':'🔊'; });
+
+  reset(); requestAnimationFrame(frame);
+})();
+</script>
+
+</body>
+</html>
