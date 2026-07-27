@@ -1,6 +1,6 @@
 /* Dot Muncher service worker — makes the game fully playable offline.
    Bump CACHE whenever the game files change so devices pick up the update. */
-var CACHE = 'dot-muncher-v3';
+var CACHE = 'dot-muncher-v4';
 var ASSETS = [
   './',
   './index.html',
